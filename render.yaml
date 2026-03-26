@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: polymarket-telegram-bot
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -m app.main watch --interval 60 --alert-score 60"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
