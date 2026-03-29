@@ -31,15 +31,43 @@ def send_telegram_message(text: str) -> bool:
             json={
                 "chat_id": chat_id,
                 "text": text,
+                "disable_web_page_preview": True,
             },
             timeout=20.0,
         )
         response.raise_for_status()
-        console.print("[green]Message Telegram envoyé.[/green]")
         return True
     except Exception as exc:
         console.print(f"[red]Erreur Telegram:[/red] {exc}")
         return False
+
+
+def market_url(market) -> str:
+    if market.slug:
+        return f"https://polymarket.com/event/{market.slug}"
+    return "https://polymarket.com"
+
+
+def is_interesting(item) -> bool:
+    q = item.quote
+    m = item.market
+
+    if item.score < 35:
+        return False
+
+    if q.best_bid is None or q.best_ask is None:
+        return False
+
+    if q.best_bid <= 0.01 and q.best_ask >= 0.99:
+        return False
+
+    if q.spread is not None and q.spread > 0.20:
+        return False
+
+    if (m.liquidity_num or 0) <= 0 and (m.volume_num or 0) <= 0:
+        return False
+
+    return True
 
 
 def fetch_ranked_markets(limit: int = 300):
@@ -73,9 +101,10 @@ def fetch_ranked_markets(limit: int = 300):
 def scan(limit: int = 300, top: int = 20):
     console.print("[bold]Scan marchés Polymarket...[/bold]")
     results = fetch_ranked_markets(limit=limit)
+    filtered = [item for item in results if is_interesting(item)]
 
-    if not results:
-        console.print("[red]Aucun marché récupéré.[/red]")
+    if not filtered:
+        console.print("[yellow]Aucun marché vraiment intéressant trouvé.[/yellow]")
         return
 
     table = Table(title="Analyse marchés Polymarket")
@@ -85,9 +114,10 @@ def scan(limit: int = 300, top: int = 20):
     table.add_column("Bid", justify="right")
     table.add_column("Ask", justify="right")
     table.add_column("Spread", justify="right")
-    table.add_column("Pourquoi")
+    table.add_column("Liquidité", justify="right")
+    table.add_column("Volume", justify="right")
 
-    for item in results[:top]:
+    for item in filtered[:top]:
         table.add_row(
             f"{item.score:.1f}",
             item.status,
@@ -95,7 +125,8 @@ def scan(limit: int = 300, top: int = 20):
             "-" if item.quote.best_bid is None else f"{item.quote.best_bid:.3f}",
             "-" if item.quote.best_ask is None else f"{item.quote.best_ask:.3f}",
             "-" if item.quote.spread is None else f"{item.quote.spread:.3f}",
-            ", ".join(item.reasons[:3]),
+            "-" if item.market.liquidity_num is None else f"{item.market.liquidity_num:,.0f}",
+            "-" if item.market.volume_num is None else f"{item.market.volume_num:,.0f}",
         )
 
     console.print(table)
@@ -104,10 +135,10 @@ def scan(limit: int = 300, top: int = 20):
 @app.command()
 def watch(
     limit: int = 300,
-    top: int = 10,
+    top: int = 15,
     interval: int = 60,
-    alert_score: float = 60.0,
-    cooldown_minutes: int = 60,
+    alert_score: float = 50.0,
+    cooldown_minutes: int = 180,
 ):
     console.print("[bold green]Mode surveillance lancé[/bold green]")
     console.print(f"Scan toutes les {interval} secondes")
@@ -128,7 +159,8 @@ def watch(
     try:
         while True:
             results = fetch_ranked_markets(limit=limit)
-            top_results = results[:top]
+            filtered = [item for item in results if is_interesting(item)]
+            top_results = filtered[:top]
 
             console.rule("[bold blue]Nouveau scan[/bold blue]")
 
@@ -155,9 +187,6 @@ def watch(
                 previous_alert_ts = last_alert_ts.get(item.market.id, 0)
                 cooldown_ok = (now - previous_alert_ts) >= cooldown_minutes * 60
                 over_threshold = item.score >= alert_score
-
-                # Au premier scan, on alerte déjà si le score est au-dessus du seuil
-                # Ensuite, on réalerte seulement après cooldown
                 should_alert = over_threshold and (first_scan or cooldown_ok)
 
                 if should_alert:
@@ -169,14 +198,22 @@ def watch(
                         f"Bid: {item.quote.best_bid}\n"
                         f"Ask: {item.quote.best_ask}\n"
                         f"Spread: {item.quote.spread}\n"
-                        f"Raisons: {', '.join(item.reasons[:4])}"
+                        f"Liquidité: {item.market.liquidity_num}\n"
+                        f"Volume: {item.market.volume_num}\n"
+                        f"Raisons: {', '.join(item.reasons[:5])}\n"
+                        f"Lien: {market_url(item.market)}"
                     )
                     console.print(f"[bold red]{msg}[/bold red]")
                     send_telegram_message(msg)
                     last_alert_ts[item.market.id] = now
 
             first_scan = False
-            console.print(table)
+
+            if top_results:
+                console.print(table)
+            else:
+                console.print("[yellow]Aucune opportunité intéressante sur ce scan.[/yellow]")
+
             time.sleep(interval)
 
     except KeyboardInterrupt:
